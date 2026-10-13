@@ -125,19 +125,33 @@ export const isSlotCapError = (status: number, body: string): boolean => {
   return code === 'slot_cap_reached' || code === 'creator_slot_cap_reached'
 }
 
+/** The first of `keys` a JSON object body sets, when it is a non-blank string, else `''`. */
+const jsonMessage = (trimmed: string, keys: readonly string[]): string => {
+  if (!trimmed.startsWith('{')) return ''
+  try {
+    const parsed = JSON.parse(trimmed)
+    const msg = keys.map((key) => parsed?.[key]).find((value) => value != null)
+    if (typeof msg === 'string' && msg.trim()) return msg
+  } catch { /* not JSON — the caller falls back */ }
+  return ''
+}
+
 /**
  * Map raw edge/proxy error bodies to a human-readable message. A dashboard
  * served through Builder Tunnels sits behind API Gateway, whose throttle
  * response is the opaque `{"message":"Rate exceeded","throttlingReasons":null}`
  * — rendering that verbatim in an error card is a terrible UX. The mapped
  * message only ever shows after the QueryClient's 429 retry ladder
- * (api/queryClient.ts) is exhausted.
+ * (api/queryClient.ts) is exhausted. A 429 the gateway sends itself names its
+ * reason in `error` (a channel limit, a full queue), which the user is shown
+ * instead; the edge throttle carries only `message`, so it never matches.
  *
  * Returns `''` for a body carrying no human message, which is the signal every
  * caller already turns into `HTTP <status>` — so that wording stays decided in
  * one place. The raw body remains on `ApiError.body` for diagnostics.
  */
 export const friendlyErrText = (status: number, body: string): string => {
+  const trimmed = body.trim()
   if (status === 429) {
     // Two different 429s reach here. The live-slot caps -- `slot_cap_reached`
     // (global) and `creator_slot_cap_reached` (per-caller) -- are hit by
@@ -146,24 +160,20 @@ export const friendlyErrText = (status: number, body: string): string => {
     // because a reload re-restores the same open tabs straight back over the
     // cap, so the guidance names the one thing that clears it. Match the parsed
     // `code` EXACTLY, not a substring of the body, so an unrelated 429 whose
-    // message happens to contain the text does not get the wrong copy. Every
-    // other 429 is the tunnel edge's burst throttle, where retrying works.
+    // message happens to contain the text does not get the wrong copy. Any
+    // other 429 the gateway sent names its reason in `error`; one with no reason,
+    // like the tunnel edge's burst throttle, is a wait-and-retry.
     if (isSlotCapError(status, body)) {
       return i18nT('api.client.too_many_open_sessions_http_429_close_old')
     }
-    return i18nT('api.client.rate_limited_by_the_tunnel_edge_http_429_too_man')
+    return jsonMessage(trimmed, ['error', 'detail'])
+      || i18nT('api.client.rate_limited_by_the_tunnel_edge_http_429_too_man')
   }
   // Backends return errors as {"error": "…"} (or detail/message). Unwrap the
   // field so the UI shows the human message with its real newlines, not the
   // raw JSON envelope with escaped \n and \".
-  const trimmed = body.trim()
-  if (trimmed.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(trimmed)
-      const msg = parsed?.error ?? parsed?.detail ?? parsed?.message
-      if (typeof msg === 'string' && msg.trim()) return msg
-    } catch { /* not JSON — fall through to raw body */ }
-  }
+  const msg = jsonMessage(trimmed, ['error', 'detail', 'message'])
+  if (msg) return msg
   // An error PAGE has no message field to unwrap, so returning it verbatim put
   // `<!DOCTYPE html><html><head><meta charset="utf…` in the dashboard's topbar.
   if (looksLikeHtmlDocument(trimmed)) return ''

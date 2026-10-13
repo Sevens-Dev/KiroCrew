@@ -26,10 +26,21 @@ describe('friendlyErrText', () => {
     expect(friendlyErrText(500, body)).toBe(body)
   })
 
-  it('keeps the tunnel-edge 429 message for an ordinary burst throttle', () => {
-    const out = friendlyErrText(429, '{"error":"x"}')
-    expect(out).toContain('Rate limited by the tunnel edge')
-    expect(out).not.toContain('session')
+  it('shows the reason the gateway gave for its own 429', () => {
+    const body = JSON.stringify({
+      error: 'Channel limit reached. Close an existing channel first.',
+      code: 'channel_limit_reached',
+    })
+    expect(friendlyErrText(429, body)).toBe('Channel limit reached. Close an existing channel first.')
+    expect(friendlyErrText(429, JSON.stringify({ detail: 'slow down' }))).toBe('slow down')
+  })
+
+  it('keeps the tunnel-edge 429 message for an edge throttle or a 429 with no reason', () => {
+    for (const body of ['{"message":"Rate exceeded","throttlingReasons":null}', '', '{"error":"  "}', '{"code":"rate_limited"}']) {
+      const out = friendlyErrText(429, body)
+      expect(out).toContain('Rate limited by the tunnel edge')
+      expect(out).not.toContain('session')
+    }
   })
 
   it('shows the close-old-sessions guidance for both live-slot cap codes', () => {
@@ -46,9 +57,9 @@ describe('friendlyErrText', () => {
 
   it('matches the slot-cap code exactly, not a substring of the body', () => {
     // An unrelated 429 whose message merely mentions slot_cap_reached, but whose
-    // real code is something else, must keep the tunnel-edge message.
+    // real code is something else, shows its own reason, not the slot-cap guidance.
     const out = friendlyErrText(429, JSON.stringify({ error: 'rate exceeded near slot_cap_reached handler', code: 'throttled' }))
-    expect(out).toContain('Rate limited by the tunnel edge')
+    expect(out).toBe('rate exceeded near slot_cap_reached handler')
     expect(out).not.toContain('Too many sessions are open')
   })
 
